@@ -1,8 +1,7 @@
 import { Component, createSignal, createEffect, onCleanup, Show } from "solid-js"
-import { Mic, Type, Play, Pause, Square, RotateCcw, Volume2, Settings, X, HelpCircle } from "lucide-solid"
+import { Mic, Type, Play, Pause, Square, RotateCcw, Volume2, HelpCircle } from "lucide-solid"
 import { Button } from "./ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs"
+import { Card, CardContent, CardHeader, CardTitle } from "./ui/card"
 import { Badge } from "./ui/badge"
 import { Slider } from "./ui/slider"
 import { Textarea } from "./ui/textarea"
@@ -13,23 +12,26 @@ export const Record: Component = () => {
   const [isPaused, setIsPaused] = createSignal(false)
   const [recordingTime, setRecordingTime] = createSignal(0)
   const [audioLevel, setAudioLevel] = createSignal(0)
-  const [recordingFormat, setRecordingFormat] = createSignal("WAV")
+  const [recordingFormat] = createSignal("WAV")
   const [showCountdown, setShowCountdown] = createSignal(false)
   const [countdown, setCountdown] = createSignal(3)
   
   // Teleprompter state
   const [teleprompterText, setTeleprompterText] = createSignal("Welcome to Waves Voice ReGen! Type your script in the teleprompter tab to see it here while you record.")
-  const [isScrolling, setIsScrolling] = createSignal(false)
   const [scrollSpeed, setScrollSpeed] = createSignal(1)
   const [fontSize, setFontSize] = createSignal(16)
   const [scrollPosition, setScrollPosition] = createSignal(0)
   const [showEditor, setShowEditor] = createSignal(true) // Default to true so you can see the editor initially
-  const [showSettingsModal, setShowSettingsModal] = createSignal(false)
+  
+  // Rehearsal state (scroll without recording)
+  const [isRehearsing, setIsRehearsing] = createSignal(false)
+  // Add countdown duration setting
+  const [countdownDuration, setCountdownDuration] = createSignal(3)
+  // Add teleprompter visibility toggle
+  const [showTeleprompter, setShowTeleprompter] = createSignal(true)
+  // Add microphone selection
   const [availableMics, setAvailableMics] = createSignal<MediaDeviceInfo[]>([])
   const [selectedMicId, setSelectedMicId] = createSignal("")
-  // Add these two new signals for countdown settings
-  const [countdownEnabled, setCountdownEnabled] = createSignal(true)
-  const [countdownDuration, setCountdownDuration] = createSignal(3)
   
   // Media recording
   let mediaRecorder: MediaRecorder | null = null
@@ -78,26 +80,21 @@ export const Record: Component = () => {
       analyser.fftSize = 256
       source.connect(analyser)
       
-      // Check if the countdown is enabled before starting it
-      if (countdownEnabled()) {
-        setShowCountdown(true)
-        setCountdown(countdownDuration()) // Use our new state for the duration
-        
-        countdownInterval = setInterval(() => {
-          setCountdown(prev => {
-            if (prev <= 1) {
-              clearInterval(countdownInterval!)
-              setShowCountdown(false)
-              startActualRecording()
-              return countdownDuration() // Reset to the correct duration
-            }
-            return prev - 1
-          })
-        }, 1000)
-      } else {
-        // If countdown is disabled, start recording immediately
-        startActualRecording()
-      }
+      // Always show countdown before recording
+      setShowCountdown(true)
+      setCountdown(countdownDuration())
+      
+      countdownInterval = setInterval(() => {
+        setCountdown(prev => {
+          if (prev <= 1) {
+            clearInterval(countdownInterval!)
+            setShowCountdown(false)
+            startActualRecording()
+            return countdownDuration() // Reset to the correct duration
+          }
+          return prev - 1
+        })
+      }, 1000)
       
     } catch (error) {
       console.error("Error accessing microphone:", error)
@@ -109,6 +106,9 @@ export const Record: Component = () => {
   const startActualRecording = () => {
     if (!mediaStream) return
     
+    // Stop rehearsal if active
+    if (isRehearsing()) setIsRehearsing(false)
+
     const chunks: Blob[] = []
     mediaRecorder = new MediaRecorder(mediaStream)
     
@@ -214,22 +214,15 @@ export const Record: Component = () => {
     }
   });
   
-  // Auto-scroll teleprompter
+  // Auto-scroll teleprompter (during recording or rehearsal)
   createEffect(() => {
-    if (isRecording() && !isPaused()) {
+    if ((isRecording() && !isPaused()) || isRehearsing()) {
       scrollInterval = setInterval(() => {
         setScrollPosition(prev => prev + scrollSpeed())
       }, 100)
     } else if (scrollInterval) {
       clearInterval(scrollInterval)
       scrollInterval = null
-    }
-  })
-  
-  // Enumerate microphones when settings modal opens
-  createEffect(() => {
-    if (showSettingsModal()) {
-      enumerateMicrophones()
     }
   })
   
@@ -254,6 +247,11 @@ export const Record: Component = () => {
     }
   }
   
+  // Enumerate microphones when component mounts
+  createEffect(() => {
+    enumerateMicrophones()
+  })
+  
   // Clean up on unmount
   onCleanup(() => {
     if (recordingInterval) clearInterval(recordingInterval)
@@ -267,65 +265,118 @@ export const Record: Component = () => {
             {/* Mobile Layout - REVISED */}
       <div class="block lg:hidden p-4 space-y-4">
 
-        {/* 1. Teleprompter Preview */}
-        <Card class="bg-gray-800 border-gray-700">
-          <CardHeader>
-            <div class="flex items-center justify-between">
-              <CardTitle class="flex items-center gap-2 text-white text-sm">
-                <Type class="w-4 h-4" />
-                Teleprompter
-              </CardTitle>
-              <Button size="icon" variant="ghost" onClick={resetScroll} class="text-gray-400 hover:text-white">
-                <RotateCcw class="w-4 h-4" />
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div class="relative">
-              <div class="bg-black rounded-lg p-4 overflow-hidden h-48" style={{ "font-size": `${fontSize()}px` }}>
-                <div class="text-white leading-relaxed transition-transform duration-100 whitespace-pre-wrap" style={{ transform: `translateY(-${scrollPosition()}px)` }}>
-                  {teleprompterText()}
-                </div>
-              </div>
-              
-              {/* UPDATED Focus line with a help icon/tooltip */}
-              <div class="group absolute top-1/3 left-2 right-2 flex items-center">
-                <div class="h-px bg-orange-500 opacity-75 flex-grow"></div>
-                <HelpCircle class="w-4 h-4 text-gray-500 ml-2 flex-shrink-0" />
+        {/* Teleprompter Toggle Button */}
+        <div class="flex justify-center">
+          <Button 
+            variant="outline" 
+            onClick={() => setShowTeleprompter(!showTeleprompter())}
+            class="bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
+          >
+            {showTeleprompter() ? "Hide Teleprompter" : "Show Teleprompter"}
+          </Button>
+        </div>
 
-                {/* The Tooltip itself */}
-                <div class="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 px-2 py-1 bg-gray-900 border border-gray-600 text-white text-xs rounded-md opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
-                  Keep your eyes here for a steady reading pace
+        {/* 1. Teleprompter Preview */}
+        <Show when={showTeleprompter()}>
+          <Card class="bg-gray-800 border-gray-700">
+            <CardHeader>
+              <div class="flex items-center justify-between">
+                <CardTitle class="flex items-center gap-2 text-white text-sm">
+                  <Type class="w-4 h-4" />
+                  Teleprompter
+                </CardTitle>
+                <div class="flex items-center gap-2">
+                  <Button variant="ghost" onClick={() => setIsRehearsing(prev => !prev)} class="text-gray-200 hover:text-white px-2 py-1 text-xs">
+                    {isRehearsing() ? "Stop" : "Rehearse"}
+                  </Button>
+                  <Button size="icon" variant="ghost" onClick={resetScroll} class="text-gray-400 hover:text-white">
+                    <RotateCcw class="w-4 h-4" />
+                  </Button>
                 </div>
               </div>
-              
-              {isRecording() && !isPaused() && (
-                <Badge class="absolute bottom-2 right-2 bg-orange-600">
-                  SCROLLING
-                </Badge>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+            </CardHeader>
+            <CardContent>
+              <div class="relative">
+                <div class="bg-black rounded-lg p-4 overflow-hidden h-48" style={{ "font-size": `${fontSize()}px` }}>
+                  <div class="text-white leading-relaxed transition-transform duration-100 whitespace-pre-wrap" style={{ transform: `translateY(-${scrollPosition()}px)` }}>
+                    {teleprompterText()}
+                  </div>
+                </div>
+                
+                {/* UPDATED Focus line with a help icon/tooltip */}
+                <div class="group absolute top-1/3 left-2 right-2 flex items-center">
+                  <div class="h-px bg-orange-500 opacity-75 flex-grow"></div>
+                  <HelpCircle class="w-4 h-4 text-gray-500 ml-2 flex-shrink-0" />
+
+                  {/* The Tooltip itself */}
+                  <div class="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 px-2 py-1 bg-gray-900 border border-gray-600 text-white text-xs rounded-md opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
+                    Keep your eyes here for a steady reading pace
+                  </div>
+                </div>
+                
+                {(isRecording() && !isPaused()) || isRehearsing() ? (
+                  <Badge class="absolute bottom-2 right-2 bg-orange-600">
+                    SCROLLING
+                  </Badge>
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
+        </Show>
 
         {/* 2. Recording Controls */}
         <Card class="bg-gray-800 border-gray-700">
           <CardContent class="space-y-4 pt-6">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-2">
-                <span class="text-gray-300">Status:</span>
-                <Badge variant={getStatusVariant()}>{getRecordingStatus()}</Badge>
+            <div class="space-y-3">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-gray-300">Status:</span>
+                  <Badge variant={getStatusVariant()}>{getRecordingStatus()}</Badge>
+                </div>
               </div>
               
-              {/* ADD THIS BUTTON FOR MOBILE SETTINGS */}
-              <Button 
-                size="icon" 
-                variant="ghost"
-                onClick={() => setShowSettingsModal(true)}
-                class="text-gray-400 hover:text-white"
-              >
-                <Settings class="w-5 h-5" />
-              </Button>
+              <div class="flex items-center gap-4">
+                {/* Countdown Duration Dropdown */}
+                <div class="flex items-center gap-2">
+                  <span class="text-sm text-gray-300">Countdown:</span>
+                  <select 
+                    value={countdownDuration()}
+                    onChange={(e) => setCountdownDuration(parseInt(e.target.value, 10))}
+                    class="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-white text-sm"
+                  >
+                    <option value={2}>2s</option>
+                    <option value={3}>3s</option>
+                    <option value={4}>4s</option>
+                    <option value={5}>5s</option>
+                    <option value={6}>6s</option>
+                    <option value={7}>7s</option>
+                    <option value={8}>8s</option>
+                    <option value={9}>9s</option>
+                    <option value={10}>10s</option>
+                    <option value={11}>11s</option>
+                    <option value={12}>12s</option>
+                    <option value={13}>13s</option>
+                    <option value={14}>14s</option>
+                    <option value={15}>15s</option>
+                  </select>
+                </div>
+                
+                {/* Microphone Selection Dropdown */}
+                <div class="flex items-center gap-2">
+                  <span class="text-sm text-gray-300">Mic:</span>
+                  <select 
+                    value={selectedMicId()}
+                    onChange={(e) => setSelectedMicId(e.target.value)}
+                    class="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-white text-sm"
+                  >
+                    {availableMics().map(mic => (
+                      <option value={mic.deviceId}>
+                        {mic.label || `Microphone ${mic.deviceId.slice(0, 8)}...`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
             </div>
             <div class="text-center">
               <div class="text-2xl font-mono text-white">{formatTime(recordingTime())}</div>
@@ -361,46 +412,48 @@ export const Record: Component = () => {
         </Card>
         
         {/* 3. Collapsible Script Editor & Settings */}
-        <Card class="bg-gray-800 border-gray-700">
-          <CardHeader class="cursor-pointer" onClick={() => setShowEditor(!showEditor())}>
-            <div class="flex items-center justify-between">
-              <CardTitle class="flex items-center gap-2 text-white text-sm">
-                <Settings class="w-4 h-4" />
-                Script & Settings
-              </CardTitle>
-              {/* This is a simple visual indicator for open/close */}
-              <span class="text-white transform transition-transform" classList={{ "rotate-180": !showEditor() }}>
-                ▼
-              </span>
-            </div>
-          </CardHeader>
-          
-          {/* Use SolidJS <Show> component to conditionally render the content */}
-          <Show when={showEditor()}>
-            <CardContent class="space-y-4">
-              <Textarea
-                value={teleprompterText()}
-                onInput={(e) => setTeleprompterText(e.target.value)}
-                placeholder="Enter your script here..."
-                class="h-32 bg-gray-700 border-gray-600 text-white placeholder-gray-400"
-              />
-              <div class="grid grid-cols-2 gap-4">
-                <div class="space-y-2">
-                  <div class="flex justify-between text-sm text-gray-300">
+        <Show when={showTeleprompter()}>
+          <Card class="bg-gray-800 border-gray-700">
+            <CardHeader class="cursor-pointer" onClick={() => setShowEditor(!showEditor())}>
+              <div class="flex items-center justify-between">
+                <CardTitle class="flex items-center gap-2 text-white text-sm">
+                  <Type class="w-4 h-4" />
+                  Script & Settings
+                </CardTitle>
+                {/* This is a simple visual indicator for open/close */}
+                <span class="text-white transform transition-transform" classList={{ "rotate-180": !showEditor() }}>
+                  ▼
+                </span>
+              </div>
+            </CardHeader>
+            
+            {/* Use SolidJS <Show> component to conditionally render the content */}
+            <Show when={showEditor()}>
+              <CardContent class="space-y-4">
+                <Textarea
+                  value={teleprompterText()}
+                  onInput={(e) => setTeleprompterText(e.target.value)}
+                  placeholder="Enter your script here..."
+                  class="h-32 bg-gray-700 border-gray-600 text-white placeholder-gray-400"
+                />
+                <div class="grid grid-cols-2 gap-4">
+                  <div class="space-y-2">
+                                      <div class="flex justify-between text-sm text-gray-300">
                     <span>Speed: {scrollSpeed()}x</span>
                   </div>
-                  <Slider min={0.5} max={5} step={0.1} value={scrollSpeed()} onValueChange={setScrollSpeed} />
-                </div>
-                <div class="space-y-2">
-                  <div class="flex justify-between text-sm text-gray-300">
-                    <span>Font: {fontSize()}px</span>
+                    <Slider min={0.5} max={5} step={0.1} value={scrollSpeed()} onValueChange={setScrollSpeed} />
                   </div>
-                  <Slider min={12} max={32} step={1} value={fontSize()} onValueChange={setFontSize} />
+                  <div class="space-y-2">
+                    <div class="flex justify-between text-sm text-gray-300">
+                      <span>Font: {fontSize()}px</span>
+                    </div>
+                    <Slider min={12} max={32} step={1} value={fontSize()} onValueChange={setFontSize} />
+                  </div>
                 </div>
-              </div>
-            </CardContent>
-          </Show>
-        </Card>
+              </CardContent>
+            </Show>
+          </Card>
+        </Show>
 
       </div>
       
@@ -411,52 +464,69 @@ export const Record: Component = () => {
           {/* Left Column - Teleprompter and Script Settings */}
           <div class="space-y-6">
           
+            {/* Teleprompter Toggle Button */}
+            <div class="flex justify-center">
+              <Button 
+                variant="outline" 
+                onClick={() => setShowTeleprompter(!showTeleprompter())}
+                class="bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
+              >
+                {showTeleprompter() ? "Hide Teleprompter" : "Show Teleprompter"}
+              </Button>
+            </div>
+          
             {/* Teleprompter Preview Card */}
-            <Card class="bg-gray-800 border-gray-700">
-              <CardHeader>
-                <div class="flex items-center justify-between">
-                  <CardTitle class="flex items-center gap-2 text-white">
-                    <Type class="w-5 h-5" />
-                    Teleprompter Preview
-                  </CardTitle>
-                  <Button size="icon" variant="ghost" onClick={resetScroll} class="text-gray-400 hover:text-white">
-                    <RotateCcw class="w-4 h-4" />
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent>
-                <div class="relative">
-                  <div class="h-64 bg-black rounded-lg p-4 overflow-hidden" style={{ "font-size": `${fontSize()}px` }}>
-                    <div class="text-white leading-relaxed transition-transform duration-100 whitespace-pre-wrap" style={{ transform: `translateY(-${scrollPosition()}px)` }}>
-                      {teleprompterText()}
+            <Show when={showTeleprompter()}>
+              <Card class="bg-gray-800 border-gray-700">
+                <CardHeader>
+                  <div class="flex items-center justify-between">
+                    <CardTitle class="flex items-center gap-2 text-white">
+                      <Type class="w-5 h-5" />
+                      Teleprompter Preview
+                    </CardTitle>
+                    <div class="flex items-center gap-2">
+                      <Button variant="ghost" onClick={() => setIsRehearsing(prev => !prev)} class="text-gray-200 hover:text-white px-3 py-1 text-sm">
+                        {isRehearsing() ? "Stop Rehearsal" : "Rehearse"}
+                      </Button>
+                      <Button size="icon" variant="ghost" onClick={resetScroll} class="text-gray-400 hover:text-white">
+                        <RotateCcw class="w-4 h-4" />
+                      </Button>
                     </div>
                   </div>
-                  
-                  {/* UPDATED Focus line with a help icon/tooltip */}
-                  <div class="group absolute top-1/3 left-2 right-2 flex items-center">
-                    <div class="h-px bg-orange-500 opacity-75 flex-grow"></div>
-                    <HelpCircle class="w-4 h-4 text-gray-500 ml-2 flex-shrink-0" />
-
-                    {/* The Tooltip itself */}
-                    <div class="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 px-2 py-1 bg-gray-900 border border-gray-600 text-white text-xs rounded-md opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
-                      Keep your eyes here for a steady reading pace
+                </CardHeader>
+                <CardContent>
+                  <div class="relative">
+                    <div class="h-64 bg-black rounded-lg p-4 overflow-hidden" style={{ "font-size": `${fontSize()}px` }}>
+                      <div class="text-white leading-relaxed transition-transform duration-100 whitespace-pre-wrap" style={{ transform: `translateY(-${scrollPosition()}px)` }}>
+                        {teleprompterText()}
+                      </div>
                     </div>
-                  </div>
+                    
+                    {/* UPDATED Focus line with a help icon/tooltip */}
+                    <div class="group absolute top-1/3 left-2 right-2 flex items-center">
+                      <div class="h-px bg-orange-500 opacity-75 flex-grow"></div>
+                      <HelpCircle class="w-4 h-4 text-gray-500 ml-2 flex-shrink-0" />
 
-                  {isRecording() && !isPaused() && (
-                    <Badge class="absolute bottom-2 right-2 bg-orange-600">
-                      SCROLLING
-                    </Badge>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-            
-            {/* UPDATED: Script & Settings Card */}
-            <Card class="bg-gray-800 border-gray-700">
+                      {/* The Tooltip itself */}
+                      <div class="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 px-2 py-1 bg-gray-900 border border-gray-600 text-white text-xs rounded-md opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
+                        Keep your eyes here for a steady reading pace
+                      </div>
+                    </div>
+
+                    {(isRecording() && !isPaused()) || isRehearsing() ? (
+                      <Badge class="absolute bottom-2 right-2 bg-orange-600">
+                        SCROLLING
+                      </Badge>
+                    ) : null}
+                  </div>
+                </CardContent>
+              </Card>
+              
+              {/* Script & Settings Card */}
+              <Card class="bg-gray-800 border-gray-700">
               <CardHeader>
                 <CardTitle class="flex items-center gap-2 text-white">
-                  <Settings class="w-5 h-5" />
+                  <Type class="w-5 h-5" />
                   Script & Settings
                 </CardTitle>
               </CardHeader>
@@ -483,6 +553,7 @@ export const Record: Component = () => {
                 </div>
               </CardContent>
             </Card>
+            </Show>
           </div>
           
           {/* Right Column - Recording Controls (remains the same) */}
@@ -493,15 +564,46 @@ export const Record: Component = () => {
                   <Mic class="w-5 h-5" />
                   Recording Controls
                 </CardTitle>
-                {/* Settings Button for Desktop */}
-                <Button 
-                  size="icon" 
-                  variant="ghost"
-                  onClick={() => setShowSettingsModal(true)}
-                  class="text-gray-400 hover:text-white"
-                >
-                  <Settings class="w-4 h-4" />
-                </Button>
+                {/* Countdown Duration Dropdown */}
+                <div class="flex items-center gap-2">
+                  <span class="text-sm text-gray-300">Countdown:</span>
+                  <select 
+                    value={countdownDuration()}
+                    onChange={(e) => setCountdownDuration(parseInt(e.target.value, 10))}
+                    class="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-white text-sm"
+                  >
+                    <option value={2}>2s</option>
+                    <option value={3}>3s</option>
+                    <option value={4}>4s</option>
+                    <option value={5}>5s</option>
+                    <option value={6}>6s</option>
+                    <option value={7}>7s</option>
+                    <option value={8}>8s</option>
+                    <option value={9}>9s</option>
+                    <option value={10}>10s</option>
+                    <option value={11}>11s</option>
+                    <option value={12}>12s</option>
+                    <option value={13}>13s</option>
+                    <option value={14}>14s</option>
+                    <option value={15}>15s</option>
+                  </select>
+                </div>
+                
+                {/* Microphone Selection Dropdown */}
+                <div class="flex items-center gap-2">
+                  <span class="text-sm text-gray-300">Mic:</span>
+                  <select 
+                    value={selectedMicId()}
+                    onChange={(e) => setSelectedMicId(e.target.value)}
+                    class="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-white text-sm"
+                  >
+                    {availableMics().map(mic => (
+                      <option value={mic.deviceId}>
+                        {mic.label || `Microphone ${mic.deviceId.slice(0, 8)}...`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </CardHeader>
             <CardContent class="space-y-6">
@@ -558,68 +660,7 @@ export const Record: Component = () => {
         </div>
       </Show>
       
-      {/* Settings Modal */}
-      <Show when={showSettingsModal()}>
-        <div class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
-          <div class="bg-gray-800 border border-gray-700 rounded-lg p-6 w-96 max-w-[90vw]">
-            <div class="flex items-center justify-between mb-4">
-              <h3 class="text-lg font-semibold text-white">Settings</h3>
-              <Button 
-                size="icon" 
-                variant="ghost"
-                onClick={() => setShowSettingsModal(false)}
-                class="text-gray-400 hover:text-white"
-              >
-                <X class="w-4 h-4" />
-              </Button>
-            </div>
-            
-            <div class="space-y-4">
-              <div class="space-y-2">
-                <label class="text-sm text-gray-300">Microphone</label>
-                <select 
-                  value={selectedMicId()}
-                  onChange={(e) => setSelectedMicId(e.target.value)}
-                  class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white"
-                >
-                  {availableMics().map(mic => (
-                    <option value={mic.deviceId}>
-                      {mic.label || `Microphone ${mic.deviceId.slice(0, 8)}...`}
-                    </option>
-                  ))}
-                </select>
-              </div>
 
-              {/* ADD THIS NEW SECTION for Countdown Settings */}
-              <div class="space-y-2">
-                <label class="text-sm text-gray-300">Countdown Timer</label>
-                <div class="flex items-center justify-between bg-gray-700 rounded-md p-3">
-                  <span class="text-white font-medium">Enable Countdown</span>
-                  <input 
-                    type="checkbox"
-                    checked={countdownEnabled()}
-                    onChange={(e) => setCountdownEnabled(e.currentTarget.checked)}
-                    class="h-5 w-5 rounded border-gray-500 bg-gray-600 text-orange-600 focus:ring-orange-500"
-                  />
-                </div>
-                <Show when={countdownEnabled()}>
-                  <div class="flex items-center justify-between bg-gray-700 rounded-md p-3">
-                    <span class="text-white font-medium">Duration (seconds)</span>
-                    <input 
-                      type="number" 
-                      min="1" 
-                      max="10"
-                      value={countdownDuration()}
-                      onInput={(e) => setCountdownDuration(parseInt(e.currentTarget.value, 10))}
-                      class="w-20 bg-gray-600 border border-gray-500 rounded-md px-2 py-1 text-white text-center"
-                    />
-                  </div>
-                </Show>
-              </div>
-            </div>
-          </div>
-        </div>
-      </Show>
     </div>
   )
 }
