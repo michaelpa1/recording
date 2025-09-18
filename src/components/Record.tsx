@@ -1,4 +1,5 @@
-import { Component, createSignal, createEffect, onCleanup, Show } from "solid-js"
+import { createSignal, createEffect, onCleanup, Show, onMount } from "solid-js"
+import type { Component } from "solid-js"
 import { Mic, Type, Play, Pause, Square, RotateCcw, Volume2, HelpCircle } from "lucide-solid"
 import { Button } from "./ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card"
@@ -15,9 +16,34 @@ export const Record: Component = () => {
   const [recordingFormat] = createSignal("WAV")
   const [showCountdown, setShowCountdown] = createSignal(false)
   const [countdown, setCountdown] = createSignal(3)
+  const [lastRms, setLastRms] = createSignal(0)
+  const [lastPeak, setLastPeak] = createSignal(0)
+  type LevelBand = 'blue' | 'green' | 'orange' | 'red'
+  const [currentBand, setCurrentBand] = createSignal<LevelBand>('blue')
+  let bandHoldUntilMs: number = 0
+  const bandHoldMs: Record<LevelBand, number> = {
+    red: 1500,
+    orange: 900,
+    green: 500,
+    blue: 500,
+  }
+  // Peak hold to ensure peaks visibly influence the meter color
+  let peakHold = 0
+  let peakHoldUntilMs = 0
   
   // Teleprompter state
-  const [teleprompterText, setTeleprompterText] = createSignal("Welcome to Waves Voice ReGen! Type your script in the teleprompter tab to see it here while you record.")
+  const [teleprompterText, setTeleprompterText] = createSignal(`[line left blank — keep reading to learn why]
+
+Welcome to the Voice ReGen teleprompter.
+This tool is here to make your recordings easier, smoother, and more professional.
+For the best results, start your script from the second line down—leave the first line blank. Then follow along with the orange-highlighted prompt line you’ll see in the Preview.
+
+When you’re speaking off the cuff, it’s easy to lose your place, stumble on words, or drift off track. A teleprompter gives you a guide—so your voice stays clear, confident, and consistent from start to finish.
+
+Even in audio-only projects, structure matters. A well-paced script keeps your delivery natural, your timing on point, and your message sharp. With this teleprompter, you can focus on performance, not memory.
+
+Take your time, adjust the speed, and let the words guide you.
+When you’re ready—hit record and bring your script to life.`)
   const [scrollSpeed, setScrollSpeed] = createSignal(1)
   const [fontSize, setFontSize] = createSignal(16)
   const [scrollPosition, setScrollPosition] = createSignal(0)
@@ -41,14 +67,19 @@ export const Record: Component = () => {
   let recordingInterval: number | null = null
   let scrollInterval: number | null = null
   let countdownInterval: number | null = null
-  
+  let sourceNode: MediaStreamAudioSourceNode | null = null
+  let meterInterval: number | null = null
+  // Recorded preview state
+  const [recordedBlob, setRecordedBlob] = createSignal<Blob | null>(null)
+  const [recordedUrl, setRecordedUrl] = createSignal<string | null>(null)
+
   // Format time as MM:SS
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
     const secs = seconds % 60
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
   }
-  
+
   // Get recording status
   const getRecordingStatus = () => {
     if (isRecording()) {
@@ -56,7 +87,7 @@ export const Record: Component = () => {
     }
     return "READY"
   }
-  
+
   // Get status badge variant
   const getStatusVariant = () => {
     if (isRecording()) {
@@ -64,21 +95,31 @@ export const Record: Component = () => {
     }
     return "default"
   }
-  
+
   // Start countdown and recording
   const startRecording = async () => {
     try {
-      const constraints = { 
-        audio: selectedMicId() ? { deviceId: { exact: selectedMicId() } } : true 
+      // Ensure we have a monitoring stream and analyser ready
+      if (!mediaStream) {
+        const constraints = { 
+          audio: selectedMicId() ? {
+            deviceId: { exact: selectedMicId() },
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+          } : {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+          }
+        }
+        mediaStream = await navigator.mediaDevices.getUserMedia(constraints)
+        // Refresh device list after permission is granted so labels populate
+        await enumerateMicrophones()
       }
-      mediaStream = await navigator.mediaDevices.getUserMedia(constraints)
-      
-      // Set up audio analysis
-      audioContext = new AudioContext()
-      const source = audioContext.createMediaStreamSource(mediaStream)
-      analyser = audioContext.createAnalyser()
-      analyser.fftSize = 256
-      source.connect(analyser)
+      if (mediaStream && !analyser) {
+        setupAnalyser(mediaStream)
+      }
       
       // Always show countdown before recording
       setShowCountdown(true)
@@ -101,13 +142,20 @@ export const Record: Component = () => {
       alert("Could not access microphone. Please check permissions.")
     }
   }
-  
+
   // Start actual recording after countdown
   const startActualRecording = () => {
     if (!mediaStream) return
     
     // Stop rehearsal if active
     if (isRehearsing()) setIsRehearsing(false)
+
+    // Clear any previous preview
+    if (recordedUrl()) {
+      try { URL.revokeObjectURL(recordedUrl()!) } catch (_) {}
+      setRecordedUrl(null)
+      setRecordedBlob(null)
+    }
 
     const chunks: Blob[] = []
     mediaRecorder = new MediaRecorder(mediaStream)
@@ -119,11 +167,8 @@ export const Record: Component = () => {
     mediaRecorder.onstop = () => {
       const blob = new Blob(chunks, { type: `audio/${recordingFormat().toLowerCase()}` })
       const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `recording-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.${recordingFormat().toLowerCase()}`
-      a.click()
-      URL.revokeObjectURL(url)
+      setRecordedBlob(blob)
+      setRecordedUrl(url)
     }
     
     mediaRecorder.start()
@@ -136,7 +181,7 @@ export const Record: Component = () => {
       setRecordingTime(prev => prev + 1)
     }, 1000)
   }
-  
+
   // Pause/Resume recording
   const togglePause = () => {
     if (!mediaRecorder) return
@@ -149,7 +194,7 @@ export const Record: Component = () => {
       setIsPaused(true)
     }
   }
-  
+
   // Stop recording
   const stopRecording = () => {
     if (mediaRecorder) {
@@ -161,9 +206,12 @@ export const Record: Component = () => {
     setIsRecording(false)
     setIsPaused(false)
     setRecordingTime(0)
-    cleanupMedia()
+    // Keep monitoring after stopping; ensure analyser exists for the stream
+    if (mediaStream && !analyser) {
+      setupAnalyser(mediaStream)
+    }
   }
-  
+
   // Cancel the countdown before recording starts
   const cancelCountdown = () => {
     if (countdownInterval) {
@@ -173,12 +221,16 @@ export const Record: Component = () => {
     setShowCountdown(false)
     cleanupMedia() // This is the key part that releases the mic
   }
-  
+
   // Clean up media resources
   const cleanupMedia = () => {
     if (mediaStream) {
       mediaStream.getTracks().forEach(track => track.stop())
       mediaStream = null
+    }
+    if (sourceNode) {
+      try { sourceNode.disconnect() } catch (_) {}
+      sourceNode = null
     }
     if (audioContext) {
       audioContext.close()
@@ -190,30 +242,139 @@ export const Record: Component = () => {
     if (mediaRecorder) {
       mediaRecorder = null
     }
-  }
-  
-  // Monitor audio levels
-  createEffect(() => {
-    if (analyser && isRecording() && !isPaused()) {
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
-      const updateLevel = () => {
-        analyser!.getByteFrequencyData(dataArray);
-        const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-        setAudioLevel(average / 255);
-      };
-      const levelInterval = setInterval(updateLevel, 100);
-      
-      // onCleanup runs when the effect re-runs or the component unmounts
-      onCleanup(() => {
-        clearInterval(levelInterval);
-        setAudioLevel(0); // Reset level here
-      });
-    } else {
-      // Also reset the level if not recording or if paused
-      setAudioLevel(0);
+    if (recordedUrl()) {
+      try { URL.revokeObjectURL(recordedUrl()!) } catch (_) {}
+      setRecordedUrl(null)
+      setRecordedBlob(null)
     }
-  });
-  
+  }
+
+  // Allow user to save the recorded preview
+  const saveRecording = () => {
+    const blob = recordedBlob()
+    const url = recordedUrl()
+    if (!blob || !url) return
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `recording-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.${recordingFormat().toLowerCase()}`
+    a.click()
+  }
+
+  // Discard the current preview and allow re-record
+  const discardRecording = () => {
+    if (recordedUrl()) {
+      try { URL.revokeObjectURL(recordedUrl()!) } catch (_) {}
+    }
+    setRecordedUrl(null)
+    setRecordedBlob(null)
+  }
+
+  // Create or refresh analyser chain for the given stream
+  const setupAnalyser = (stream: MediaStream) => {
+    if (!audioContext) {
+      audioContext = new AudioContext()
+    }
+    // Resume the context in case it is suspended due to autoplay policy
+    if (audioContext.state === "suspended") {
+      audioContext.resume().catch(() => {})
+    }
+    if (sourceNode) {
+      try { sourceNode.disconnect() } catch (_) {}
+      sourceNode = null
+    }
+    analyser = audioContext.createAnalyser()
+    analyser.fftSize = 1024
+    analyser.smoothingTimeConstant = 0.2
+    sourceNode = audioContext.createMediaStreamSource(stream)
+    sourceNode.connect(analyser)
+  }
+
+  // Start passive level monitoring of selected mic
+  const startLevelMonitor = async () => {
+    try {
+      // Stop previous monitor stream if any
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(track => track.stop())
+        mediaStream = null
+      }
+      const constraints = {
+        audio: selectedMicId() ? {
+          deviceId: { exact: selectedMicId() },
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        } : {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        }
+      }
+      mediaStream = await navigator.mediaDevices.getUserMedia(constraints)
+      await enumerateMicrophones()
+      setupAnalyser(mediaStream)
+    } catch (error) {
+      console.error("Error starting level monitor:", error)
+    }
+  }
+
+  // Start a persistent UI meter loop on mount
+  onMount(() => {
+    if (!meterInterval) {
+      meterInterval = setInterval(() => {
+        if (!analyser) {
+          setAudioLevel(0)
+          setCurrentBand('blue')
+          return
+        }
+        const timeDomain = new Uint8Array(analyser.fftSize)
+        analyser.getByteTimeDomainData(timeDomain)
+        let sumSquares = 0
+        let peak = 0
+        for (let i = 0; i < timeDomain.length; i++) {
+          const sample = (timeDomain[i] - 128) / 128
+          sumSquares += sample * sample
+          const a = Math.abs(sample)
+          if (a > peak) peak = a
+        }
+        const rms = Math.sqrt(sumSquares / timeDomain.length)
+        setLastRms(rms)
+        // Peak hold (~300ms)
+        const now = performance.now()
+        if (peak > peakHold || now >= peakHoldUntilMs) {
+          peakHold = peak
+          peakHoldUntilMs = now + 300
+        }
+        setLastPeak(peakHold)
+        const boosted = Math.min(1, rms * 3)
+        const smoothed = 0.8 * audioLevel() + 0.2 * boosted
+        setAudioLevel(smoothed)
+
+        // Sustained band logic with hold
+        const instantBand = classifyInstantBand(rms, peakHold)
+        const held = currentBand()
+        if (instantBand !== held) {
+          // Escalate immediately to a higher severity band
+          const order: LevelBand[] = ['blue','green','orange','red']
+          if (order.indexOf(instantBand) > order.indexOf(held)) {
+            setCurrentBand(instantBand)
+            bandHoldUntilMs = now + bandHoldMs[instantBand]
+          } else {
+            // De-escalate only if hold expired
+            if (now >= bandHoldUntilMs) {
+              setCurrentBand(instantBand)
+              bandHoldUntilMs = now + bandHoldMs[instantBand]
+            }
+          }
+        } else {
+          // Extend hold while staying in same band
+          if (now >= bandHoldUntilMs) {
+            bandHoldUntilMs = now + bandHoldMs[held]
+          }
+        }
+      }, 100) as unknown as number
+    }
+  })
+
   // Auto-scroll teleprompter (during recording or rehearsal)
   createEffect(() => {
     if ((isRecording() && !isPaused()) || isRehearsing()) {
@@ -225,12 +386,12 @@ export const Record: Component = () => {
       scrollInterval = null
     }
   })
-  
+
   // Reset scroll position
   const resetScroll = () => {
     setScrollPosition(0)
   }
-  
+
   // Enumerate available microphones
   const enumerateMicrophones = async () => {
     try {
@@ -246,20 +407,159 @@ export const Record: Component = () => {
       console.error("Error enumerating microphones:", error)
     }
   }
-  
-  // Enumerate microphones when component mounts
-  createEffect(() => {
+
+  // Enumerate microphones when component mounts and when devices change
+  onMount(() => {
     enumerateMicrophones()
+    // Begin passive monitoring on load (will prompt permission once)
+    startLevelMonitor()
+    const handleDeviceChange = () => {
+      enumerateMicrophones()
+      if (!isRecording()) {
+        startLevelMonitor()
+      }
+    }
+    if (navigator.mediaDevices && "addEventListener" in navigator.mediaDevices) {
+      navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange)
+    } else if (navigator.mediaDevices && "ondevicechange" in navigator.mediaDevices) {
+      // Fallback for older browsers
+      // @ts-ignore
+      navigator.mediaDevices.ondevicechange = handleDeviceChange
+    }
+
+    onCleanup(() => {
+      if (navigator.mediaDevices && "removeEventListener" in navigator.mediaDevices) {
+        navigator.mediaDevices.removeEventListener("devicechange", handleDeviceChange)
+      } else if (navigator.mediaDevices && "ondevicechange" in navigator.mediaDevices) {
+        // @ts-ignore
+        navigator.mediaDevices.ondevicechange = null
+      }
+    })
   })
-  
+
+  // When the selected microphone changes, restart monitoring if not recording
+  createEffect(() => {
+    const id = selectedMicId()
+    if (!isRecording()) {
+      startLevelMonitor()
+    }
+  })
+
   // Clean up on unmount
   onCleanup(() => {
     if (recordingInterval) clearInterval(recordingInterval)
     if (scrollInterval) clearInterval(scrollInterval)
     if (countdownInterval) clearInterval(countdownInterval)
+    if (meterInterval) clearInterval(meterInterval)
     cleanupMedia()
   })
-  
+
+  // Map current held band to bar color
+  const getLevelColorClass = () => {
+    const band = currentBand()
+    if (band === 'red') return 'bg-red-600'
+    if (band === 'orange') return 'bg-orange-500'
+    if (band === 'green') return 'bg-green-500'
+    return 'bg-blue-500'
+  }
+
+  // Tooltip text for each band (held)
+  const getLevelTooltip = () => {
+    const band = currentBand()
+    if (band === 'red') return 'Clipping / Distortion'
+    if (band === 'orange') return 'Getting Loud / Warning'
+    if (band === 'green') return 'Just Right / Optimal'
+    return 'Too Low / No Signal'
+  }
+
+  // Text color for band label (held)
+  const getLevelTextClass = () => {
+    const band = currentBand()
+    if (band === 'red') return 'text-red-500'
+    if (band === 'orange') return 'text-orange-400'
+    if (band === 'green') return 'text-green-400'
+    return 'text-blue-400'
+  }
+
+  const classifyInstantBand = (rms: number, peak: number): LevelBand => {
+    if (peak >= 0.99) return 'red'
+    const db = rms > 1e-6 ? 20 * Math.log10(rms) : -Infinity
+    if (db >= -1) return 'red'
+    if (db >= -6) return 'orange'
+    if (db >= -18) return 'green'
+    return 'blue'
+  }
+
+  // Convert current RMS/peak to dBFS (0 dB = full scale). Caps clipping by peak.
+  const getCurrentDb = (): number => {
+    const peak = lastPeak()
+    if (peak >= 0.99) return 0 // Treat near-full-scale peak as clipping
+    const rms = lastRms()
+    if (rms <= 1e-6) return -100
+    const db = 20 * Math.log10(rms)
+    return Math.max(-100, Math.min(0, db))
+  }
+
+  // Simple HEX color utilities for blending
+  const hexToRgb = (hex: string) => {
+    const h = hex.replace('#', '')
+    const bigint = parseInt(h, 16)
+    return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 }
+  }
+  const rgbToHex = (r: number, g: number, b: number) => {
+    const toHex = (v: number) => v.toString(16).padStart(2, '0')
+    return `#${toHex(Math.round(r))}${toHex(Math.round(g))}${toHex(Math.round(b))}`
+  }
+  const blendHex = (a: string, b: string, t: number) => {
+    const ca = hexToRgb(a)
+    const cb = hexToRgb(b)
+    const r = ca.r + (cb.r - ca.r) * t
+    const g = ca.g + (cb.g - ca.g) * t
+    const b2 = ca.b + (cb.b - ca.b) * t
+    return rgbToHex(r, g, b2)
+  }
+
+  // Build a CSS linear-gradient background based on current dB
+  // Rules:
+  // - Below -18 dB: solid blue
+  // - -18..-6 dB: green -> orange gradient (more orange near -6 dB)
+  // - -6..0 dB: green -> yellow (mid) -> red gradient (more red near 0 dB)
+  // - >= 0 dB: solid red
+  const getMeterBackground = (db: number): string => {
+    const blue = '#3b82f6'   // tailwind blue-500
+    const green = '#22c55e'  // green-500
+    const orange = '#f59e0b' // orange-500
+    const yellow = '#facc15' // yellow-400
+    const red = '#ef4444'    // red-500
+
+    // If peak hold indicates clipping, enforce solid red
+    if (lastPeak() >= 0.99 || db >= 0) return red
+    if (db < -18) return blue
+
+    if (db < -6) {
+      const t = (db + 18) / 12 // 0 at -18dB, 1 at -6dB
+      const end = blendHex(green, orange, Math.min(1, Math.max(0, t)))
+      return `linear-gradient(90deg, ${green} 0%, ${end} 100%)`
+    }
+
+    // -6..0 dB — bias more strongly towards red near -1 dB
+    const t2 = (db + 6) / 6 // 0 at -6dB, 1 at 0dB
+    const bias = Math.min(1, Math.max(0, (db + 6) / 5)) // grows faster near 0
+    const midStop = Math.round(Math.min(100, Math.max(0, (t2 * 100))))
+    const safeMid = Math.max(20, Math.min(80, midStop))
+    const start = blendHex(green, yellow, 0.3)
+    const mid = blendHex(yellow, red, bias)
+    return `linear-gradient(90deg, ${start} 0%, ${mid} ${safeMid}%, ${red} 100%)`
+  }
+
+  // Tooltip label per dB rules
+  const getDbTooltip = (db: number): string => {
+    if (db >= 0) return 'Clipping! Reduce Input'
+    if (db >= -6) return 'Warning'
+    if (db >= -18) return 'Optimal Level'
+    return 'No Signal / Too Low'
+  }
+
   return (
     <div class="min-h-screen bg-gray-900">
             {/* Mobile Layout - REVISED */}
@@ -324,7 +624,21 @@ export const Record: Component = () => {
           </Card>
         </Show>
 
-        {/* 2. Recording Controls */}
+        {/* 2. Recording Controls OR Preview (mobile) */}
+        <Show when={!recordedUrl() || isRecording()} fallback={
+          <Card class="bg-gray-800 border-gray-700">
+            <CardHeader>
+              <CardTitle class="text-white text-sm">Preview</CardTitle>
+            </CardHeader>
+            <CardContent class="space-y-4">
+              <audio src={recordedUrl() ?? undefined} controls class="w-full" />
+              <div class="flex gap-2">
+                <Button onClick={saveRecording} class="flex-1 bg-green-600 hover:bg-green-700">Save</Button>
+                <Button onClick={discardRecording} variant="outline" class="flex-1">Discard</Button>
+              </div>
+            </CardContent>
+          </Card>
+        }>
         <Card class="bg-gray-800 border-gray-700">
           <CardContent class="space-y-4 pt-6">
             <div class="space-y-3">
@@ -385,9 +699,10 @@ export const Record: Component = () => {
               <div class="flex items-center gap-2">
                 <Volume2 class="w-4 h-4 text-gray-400" />
                 <span class="text-sm text-gray-300">Audio Level</span>
+                <span class={`text-sm ${getLevelTextClass()}`}>• {getLevelTooltip()}</span>
               </div>
-              <div class="h-4 bg-gray-700 rounded-full overflow-hidden">
-                <div class="h-full bg-green-500 transition-all duration-100" style={{ width: `${audioLevel() * 100}%` }} />
+              <div class="h-4 bg-gray-700 rounded-full overflow-hidden" title={getDbTooltip(getCurrentDb())}>
+                <div class="h-full transition-all duration-100" style={{ width: `${audioLevel() * 100}%`, "background": getMeterBackground(getCurrentDb()) }} />
               </div>
             </div>
             <div class="flex gap-2">
@@ -410,6 +725,7 @@ export const Record: Component = () => {
             </div>
           </CardContent>
         </Card>
+        </Show>
         
         {/* 3. Collapsible Script Editor & Settings */}
         <Show when={showTeleprompter()}>
@@ -557,92 +873,109 @@ export const Record: Component = () => {
           </div>
           
           {/* Right Column - Recording Controls (remains the same) */}
-          <Card class="bg-gray-800 border-gray-700 h-fit">
-            <CardHeader>
-              <div class="flex items-center justify-between">
-                <CardTitle class="flex items-center gap-2 text-white">
-                  <Mic class="w-5 h-5" />
-                  Recording Controls
-                </CardTitle>
-                {/* Countdown Duration Dropdown */}
-                <div class="flex items-center gap-2">
-                  <span class="text-sm text-gray-300">Countdown:</span>
-                  <select 
-                    value={countdownDuration()}
-                    onChange={(e) => setCountdownDuration(parseInt(e.target.value, 10))}
-                    class="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-white text-sm"
-                  >
-                    <option value={2}>2s</option>
-                    <option value={3}>3s</option>
-                    <option value={4}>4s</option>
-                    <option value={5}>5s</option>
-                    <option value={6}>6s</option>
-                    <option value={7}>7s</option>
-                    <option value={8}>8s</option>
-                    <option value={9}>9s</option>
-                    <option value={10}>10s</option>
-                    <option value={11}>11s</option>
-                    <option value={12}>12s</option>
-                    <option value={13}>13s</option>
-                    <option value={14}>14s</option>
-                    <option value={15}>15s</option>
-                  </select>
+          {/* Recording Controls OR Preview (desktop right column) */}
+          <Show when={!recordedUrl() || isRecording()} fallback={
+            <Card class="bg-gray-800 border-gray-700 h-fit">
+              <CardHeader>
+                <CardTitle class="flex items-center gap-2 text-white">Preview</CardTitle>
+              </CardHeader>
+              <CardContent class="space-y-4">
+                <audio src={recordedUrl() ?? undefined} controls class="w-full" />
+                <div class="flex gap-2">
+                  <Button onClick={saveRecording} class="flex-1 bg-green-600 hover:bg-green-700">Save</Button>
+                  <Button onClick={discardRecording} variant="outline" class="flex-1">Discard</Button>
                 </div>
-                
-                {/* Microphone Selection Dropdown */}
-                <div class="flex items-center gap-2">
-                  <span class="text-sm text-gray-300">Mic:</span>
-                  <select 
-                    value={selectedMicId()}
-                    onChange={(e) => setSelectedMicId(e.target.value)}
-                    class="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-white text-sm"
-                  >
-                    {availableMics().map(mic => (
-                      <option value={mic.deviceId}>
-                        {mic.label || `Microphone ${mic.deviceId.slice(0, 8)}...`}
-                      </option>
-                    ))}
-                  </select>
+              </CardContent>
+            </Card>
+          }>
+            <Card class="bg-gray-800 border-gray-700 h-fit">
+              <CardHeader>
+                <div class="flex items-center justify-between">
+                  <CardTitle class="flex items-center gap-2 text-white">
+                    <Mic class="w-5 h-5" />
+                    Recording Controls
+                  </CardTitle>
+                  {/* Countdown Duration Dropdown */}
+                  <div class="flex items-center gap-2">
+                    <span class="text-sm text-gray-300">Countdown:</span>
+                    <select 
+                      value={countdownDuration()}
+                      onChange={(e) => setCountdownDuration(parseInt(e.target.value, 10))}
+                      class="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-white text-sm"
+                    >
+                      <option value={2}>2s</option>
+                      <option value={3}>3s</option>
+                      <option value={4}>4s</option>
+                      <option value={5}>5s</option>
+                      <option value={6}>6s</option>
+                      <option value={7}>7s</option>
+                      <option value={8}>8s</option>
+                      <option value={9}>9s</option>
+                      <option value={10}>10s</option>
+                      <option value={11}>11s</option>
+                      <option value={12}>12s</option>
+                      <option value={13}>13s</option>
+                      <option value={14}>14s</option>
+                      <option value={15}>15s</option>
+                    </select>
+                  </div>
+                  
+                  {/* Microphone Selection Dropdown */}
+                  <div class="flex items-center gap-2">
+                    <span class="text-sm text-gray-300">Mic:</span>
+                    <select 
+                      value={selectedMicId()}
+                      onChange={(e) => setSelectedMicId(e.target.value)}
+                      class="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-white text-sm"
+                    >
+                      {availableMics().map(mic => (
+                        <option value={mic.deviceId}>
+                          {mic.label || `Microphone ${mic.deviceId.slice(0, 8)}...`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
-              </div>
-            </CardHeader>
-            <CardContent class="space-y-6">
-              <div class="flex items-center justify-between">
-                <span class="text-gray-300">Status:</span>
-                <Badge variant={getStatusVariant()}>{getRecordingStatus()}</Badge>
-              </div>
-              <div class="text-center">
-                <div class="text-4xl font-mono text-white">{formatTime(recordingTime())}</div>
-              </div>
-              <div class="space-y-2">
-                <div class="flex items-center gap-2">
-                  <Volume2 class="w-4 h-4 text-gray-400" />
-                  <span class="text-sm text-gray-300">Audio Level</span>
+              </CardHeader>
+              <CardContent class="space-y-6">
+                <div class="flex items-center justify-between">
+                  <span class="text-gray-300">Status:</span>
+                  <Badge variant={getStatusVariant()}>{getRecordingStatus()}</Badge>
                 </div>
-                <div class="h-4 bg-gray-700 rounded-full overflow-hidden">
-                  <div class="h-full bg-green-500 transition-all duration-100" style={{ width: `${audioLevel() * 100}%` }}/>
+                <div class="text-center">
+                  <div class="text-4xl font-mono text-white">{formatTime(recordingTime())}</div>
                 </div>
-              </div>
-              <div class="flex gap-2">
-                {!isRecording() ? (
-                  <Button onClick={startRecording} class="flex-1 bg-orange-600 hover:bg-orange-700 text-lg py-6">
-                    Start Recording
-                  </Button>
-                ) : (
-                  <>
-                    <Button onClick={togglePause} variant="outline" class="flex-1">
-                      {isPaused() ? <Play class="w-4 h-4" /> : <Pause class="w-4 h-4" />}
-                      {isPaused() ? "Resume" : "Pause"}
+                <div class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <Volume2 class="w-4 h-4 text-gray-400" />
+                    <span class="text-sm text-gray-300">Audio Level</span>
+                    <span class={`text-sm ${getLevelTextClass()}`}>• {getLevelTooltip()}</span>
+                  </div>
+                  <div class="h-4 bg-gray-700 rounded-full overflow-hidden" title={getDbTooltip(getCurrentDb())}>
+                    <div class="h-full transition-all duration-100" style={{ width: `${audioLevel() * 100}%`, "background": getMeterBackground(getCurrentDb()) }} />
+                  </div>
+                </div>
+                <div class="flex gap-2">
+                  {!isRecording() ? (
+                    <Button onClick={startRecording} class="flex-1 bg-orange-600 hover:bg-orange-700 text-lg py-6">
+                      Start Recording
                     </Button>
-                    <Button onClick={stopRecording} variant="destructive" class="flex-1">
-                      <Square class="w-4 h-4" />
-                      Stop
-                    </Button>
-                  </>
-                )}
-              </div>
-            </CardContent>
-          </Card>
+                  ) : (
+                    <>
+                      <Button onClick={togglePause} variant="outline" class="flex-1">
+                        {isPaused() ? <Play class="w-4 h-4" /> : <Pause class="w-4 h-4" />}
+                        {isPaused() ? "Resume" : "Pause"}
+                      </Button>
+                      <Button onClick={stopRecording} variant="destructive" class="flex-1">
+                        <Square class="w-4 h-4" />
+                        Stop
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </Show>
         </div>
       </div>
       
