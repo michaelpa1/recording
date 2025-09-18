@@ -1,39 +1,25 @@
-import { type Component, JSX, splitProps } from "solid-js"
-import { cn } from "../../lib/utils"
+import { type Component, type JSX, splitProps } from "solid-js"
 
-export interface ButtonProps extends JSX.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: "default" | "destructive" | "outline" | "secondary" | "ghost" | "link"
-  size?: "default" | "sm" | "lg" | "icon"
-}
-
-const buttonVariants = {
-  variant: {
-    default: "bg-primary text-primary-foreground hover:bg-primary/90",
-    destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-    outline: "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
-    secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-    ghost: "hover:bg-accent hover:text-accent-foreground",
-    link: "text-primary underline-offset-4 hover:underline"
-  },
-  size: {
-    default: "h-10 px-4 py-2",
-    sm: "h-9 rounded-md px-3",
-    lg: "h-11 rounded-md px-8",
-    icon: "h-10 w-10"
-  }
+interface ButtonProps extends JSX.ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: "default" | "outline" | "destructive" | "ghost"
+  size?: "default" | "icon"
 }
 
 export const Button: Component<ButtonProps> = (props) => {
   const [local, rest] = splitProps(props, ["class", "variant", "size"])
-  
+  const variantClass =
+    local.variant === "outline"
+      ? "border border-gray-600 text-white"
+      : local.variant === "destructive"
+      ? "bg-red-600 text-white"
+      : local.variant === "ghost"
+      ? "text-gray-300 hover:bg-gray-800/60"
+      : "bg-gray-700 text-white"
+  const sizeClass = local.size === "icon" ? "h-8 w-8 p-0" : "px-3 py-2"
+
   return (
     <button
-      class={cn(
-        "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
-        buttonVariants.variant[local.variant || "default"],
-        buttonVariants.size[local.size || "default"],
-        local.class
-      )}
+      class={`inline-flex items-center justify-center rounded ${variantClass} ${sizeClass} ${local.class || ""}`}
       {...rest}
     />
   )

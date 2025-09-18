@@ -439,7 +439,7 @@ When you’re ready—hit record and bring your script to life.`)
 
   // When the selected microphone changes, restart monitoring if not recording
   createEffect(() => {
-    const id = selectedMicId()
+    selectedMicId()
     if (!isRecording()) {
       startLevelMonitor()
     }
@@ -454,25 +454,7 @@ When you’re ready—hit record and bring your script to life.`)
     cleanupMedia()
   })
 
-  // Map current held band to bar color
-  const getLevelColorClass = () => {
-    const band = currentBand()
-    if (band === 'red') return 'bg-red-600'
-    if (band === 'orange') return 'bg-orange-500'
-    if (band === 'green') return 'bg-green-500'
-    return 'bg-blue-500'
-  }
-
-  // Tooltip text for each band (held)
-  const getLevelTooltip = () => {
-    const band = currentBand()
-    if (band === 'red') return 'Clipping / Distortion'
-    if (band === 'orange') return 'Getting Loud / Warning'
-    if (band === 'green') return 'Just Right / Optimal'
-    return 'Too Low / No Signal'
-  }
-
-  // Text color for band label (held)
+  // Map current held band to text color/tooltip (bar color is gradient-based below)
   const getLevelTextClass = () => {
     const band = currentBand()
     if (band === 'red') return 'text-red-500'
@@ -557,6 +539,15 @@ When you’re ready—hit record and bring your script to life.`)
     if (db >= 0) return 'Clipping! Reduce Input'
     if (db >= -6) return 'Warning'
     if (db >= -18) return 'Optimal Level'
+    return 'No Signal / Too Low'
+  }
+
+  // Tooltip text for inline label (held band)
+  const getLevelTooltip = () => {
+    const band = currentBand()
+    if (band === 'red') return 'Clipping! Reduce Input'
+    if (band === 'orange') return 'Warning'
+    if (band === 'green') return 'Optimal Level'
     return 'No Signal / Too Low'
   }
 
